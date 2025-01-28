@@ -1,0 +1,163 @@
+
+
+```{r}
+# Charger les librairies nécessaires
+library(dplyr)      # Manipulation des données
+library(tidyr)      # Manipulation des données
+library(ggplot2)    # Visualisation
+library(readr)      # Lecture de fichiers CSV
+library(GGally)
+
+# Charger les données
+train <- read_csv("train_set.csv")
+
+# Afficher un aperçu des données
+head(train)
+
+```
+```{r}
+summary(train)
+```
+
+
+```{r}
+# Vérification des valeurs manquantes
+missing_values <- train %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Column", values_to = "Valeurs Manquantes")
+print(missing_values)
+```
+
+
+```{r}
+# Vérification des doublons
+train <- train %>% distinct()
+```
+
+
+```{r}
+# Conversion des colonnes catégoriques en facteurs
+categorical_cols <- train %>% select(where(is.character)) %>% colnames()
+train[categorical_cols] <- lapply(train[categorical_cols], as.factor)
+```
+
+
+
+```{r}
+
+ggplot(train, aes(x = Claim)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Répartition des sinistres", x = "Nombre de sinistres", y = "Fréquence") +
+  theme_minimal()
+
+```
+
+```{r}
+library(GGally)
+
+numeric_cols <- train %>% 
+  select(where(is.numeric), -PolID) # Exclure l'identifiant
+
+ggcorr(numeric_cols, label = TRUE, label_round = 2, hjust = 0.8) +
+  labs(title = "Matrice de corrélation des variables numériques")
+
+```
+Pas de variables fortement corrélés
+
+```{r}
+ggplot(train, aes(x = Bonus_Malus)) +
+  geom_histogram(fill = "steelblue", bins = 30, color = "black") +
+  labs(title = "Répartition du Bonus/Malus", x = "Bonus/Malus", y = "Fréquence") +
+  theme_minimal()
+```
+Grand déséquilibre (songer à répartir en 3 classes: >100 (malus) 60< <100 (bonus modéré) 60< (grand bonus)
+```{r}
+ggplot(train, aes(x = Age)) +
+  geom_histogram(fill = "lightgreen", bins = 30, color = "black") +
+  labs(title = "Répartition par âge du conducteur", x = "Âge", y = "Fréquence") +
+  theme_minimal()
+
+```
+Outliers: De très vieux conducteurs (>80ans) et de très jeunes (18ans)
+
+```{r}
+ggplot(train, aes(x = Age, y = Claim)) +
+  geom_col(fill = "skyblue") +
+  labs(title = "Nombre de sinistres par âge du conducteur",
+       x = "Âge du conducteur",
+       y = "Nombre de sinistres") +
+  theme_minimal()
+
+```
+Différentes vitesses d'évolutions: songer à répartir en trois classes: <25 ans , 25 ans< <50 ans et > 50 ans
+
+```{r}
+
+
+```
+
+
+```{r}
+ggplot(train, aes(x = Car_Fuel, fill = Car_Fuel)) +
+  geom_bar() +
+  labs(title = "Répartition du type de carburant", x = "Type de carburant", y = "Fréquence") +
+  theme_minimal()
+
+```
+RAS
+
+```{r}
+ggplot(train, aes(x = French_region, y = Inhab_density, fill = French_region)) +
+  geom_boxplot() +
+  labs(title = "Densité d’habitants par région", x = "Région", y = "Densité (hab/km²)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+Grande distribution de densités en IDF, penser à rajouter une colonne qui contient la moyenne pour chaque ville pour estomper cet effet
+
+```{r}
+ggplot(train, aes(x = Car_Age, y = Claim)) +
+  geom_jitter(color = "purple", alpha = 0.6) +
+  labs(title = "Âge de la voiture vs Sinistres", x = "Âge du véhicule (années)", y = "Nombre de sinistres") +
+  theme_minimal()
+
+```
+Véhicules à 100 ans, outliers
+
+```{r}
+top_models <- train %>% 
+  count(Car_Model, sort = TRUE) %>% 
+  top_n(10, n)
+
+ggplot(top_models, aes(x = reorder(Car_Model, n), y = n, fill = Car_Model)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top 10 des marques de voiture les plus fréquentes", x = "Marque de voiture", y = "Fréquence") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Classe assez déséquilibrée
+
+```{r}
+# Standardisation des colonnes numériques
+numerical_cols <- train %>%
+  select(where(is.numeric), -PolID) %>%
+  colnames()
+
+train_norm<-train
+train_norm[numerical_cols] <- scale(train[numerical_cols])
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+

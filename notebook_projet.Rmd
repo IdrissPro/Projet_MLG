@@ -7,9 +7,11 @@ library(tidyr)      # Manipulation des données
 library(ggplot2)    # Visualisation
 library(readr)      # Lecture de fichiers CSV
 library(GGally)
+set.seed(2025)
 
 # Charger les données
-train <- read_csv("train_set.csv")
+train <- read.csv('train_set.csv', header = T, sep = ",",dec=".")
+
 
 # Afficher un aperçu des données
 head(train)
@@ -27,6 +29,7 @@ missing_values <- train %>%
   pivot_longer(everything(), names_to = "Column", values_to = "Valeurs Manquantes")
 print(missing_values)
 ```
+
 
 
 ```{r}
@@ -114,11 +117,12 @@ ggplot(train, aes(x = French_region, y = Inhab_density, fill = French_region)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 ```
-Grande distribution de densités en IDF, penser à rajouter une colonne qui contient la moyenne pour chaque ville pour estomper cet effet
+Grande distribution de densités en IDF, penser à rajouter une colonne qui contient la moyenne pour chaque ville pour estomper cet effet.
+
+Peut-être penser à supprimer les régions (par bon sens, ce qui est fortement impactant sur le nb de sinistres est la densité d'habitants et non pas la région). A vérifier par tests statistiques
 
 ```{r}
 ggplot(train, aes(x = Car_Age, y = Claim)) +
-  geom_jitter(color = "purple", alpha = 0.6) +
   labs(title = "Âge de la voiture vs Sinistres", x = "Âge du véhicule (années)", y = "Nombre de sinistres") +
   theme_minimal()
 
@@ -142,22 +146,347 @@ Classe assez déséquilibrée
 
 ```{r}
 # Standardisation des colonnes numériques
-numerical_cols <- train %>%
-  select(where(is.numeric), -PolID) %>%
-  colnames()
+#numerical_cols <- train %>%
+#  select(where(is.numeric), -PolID) %>%
+#  colnames()
 
-train_norm<-train
-train_norm[numerical_cols] <- scale(train[numerical_cols])
+#train_norm<-train
+#train_norm[numerical_cols] <- scale(train[numerical_cols])
 
+```
+
+
+
+## Modélisation
+
+Fonction RMSE_C pour évaluer le modèle
+```{r}
+library(Metrics)  
+
+rmse_c <- function(actuals, predictions) {
+  # Définition des classes
+  C_1 <- which(actuals %in% c(0, 1))
+  C_2 <- which(actuals == 2)
+  C_3 <- which(actuals == 3)
+  C_4 <- which(actuals > 3)
+  
+  # Calcul du RMSE pour chaque classe (en évitant les erreurs si une classe est vide)
+  rmse_1 <- rmse(actuals[C_1], predictions[C_1]) 
+  rmse_2 <- rmse(actuals[C_2], predictions[C_2]) 
+  rmse_3 <- rmse(actuals[C_3], predictions[C_3]) 
+  rmse_4 <- rmse(actuals[C_4], predictions[C_4]) 
+  
+  # Combinaison des RMSE (en ignorant les valeurs NA)
+  rmse_values <- c(rmse_1, rmse_2, rmse_3, rmse_4)
+  RMSE_C <- mean(rmse_values, na.rm = TRUE)  # Moyenne des RMSE valides
+  
+  # Affichage des résultats
+  cat("RMSE_1 (classe très fréquente) :", rmse_1, "\n")
+  cat("RMSE_2 (classe fréquente) :", rmse_2, "\n")
+  cat("RMSE_3 (classe rare) :", rmse_3, "\n")
+  cat("RMSE_4 (classe très rare) :", rmse_4, "\n")
+  cat("RMSE combiné (RMSE_C) :", RMSE_C, "\n")
+  
+  return(RMSE_C)
+}
+
+```
+
+Data prep: Splitting 70/30 + ajout de la colonne Age_class + suppression de l'ID (ne sert à rien) + suppression de French_region + encodage ordinal (pour éviter les modalités nombreuses) +
+```{r}
+library(dplyr)
+library(lattice)
+library(caret)
+library(rsample)
+# Train/test split stratified
+split <- initial_split(train, prop = 0.7, strata = "Claim")  # Stratified split
+
+train_set <- training(split)
+test_set <- testing(split)
+
+# Remove the 'French_region' predictor
+train_set <- train_set %>% select(-French_region)
+test_set <- test_set %>% select(-French_region)
+
+# Remove the 'PolID' predictor
+train_set <- train_set %>% select(-PolID)
+test_set <- test_set %>% select(-PolID)
+
+# Add the 'Age_class' column
+train_set <- train_set %>%
+  mutate(Age_class = case_when(
+    Age < 25 ~ 0,
+    Age >= 25 & Age <= 50 ~ 1,
+    Age > 50 ~ 2
+  ))
+
+test_set <- test_set %>%
+  mutate(Age_class = case_when(
+    Age < 25 ~ 0,
+    Age >= 25 & Age <= 50 ~ 1,
+    Age > 50 ~ 2
+  ))
+
+# Convert categorical variables to ordinal encoding
+train_set <- train_set %>%
+  mutate(
+    Car_Model = as.numeric(factor(Car_Model, levels = unique(Car_Model))),
+    Car_Fuel = as.numeric(factor(Car_Fuel, levels = unique(Car_Fuel))),
+    Urban_rural_class = as.numeric(factor(Urban_rural_class, levels = unique(Urban_rural_class)))
+  )
+
+test_set <- test_set %>%
+  mutate(
+    Car_Model = as.numeric(factor(Car_Model, levels = unique(Car_Model))),
+    Car_Fuel = as.numeric(factor(Car_Fuel, levels = unique(Car_Fuel))),
+    Urban_rural_class = as.numeric(factor(Urban_rural_class, levels = unique(Urban_rural_class)))
+  )
+
+# Appliquer la fonction scale uniquement sur les variables prédictives (exclure 'Claim')
+train_set_scaled <- train_set %>%
+  select(-Claim) %>%  # Exclure la variable cible
+  scale() %>%         # Standardiser les autres variables
+  as.data.frame()
+
+# Appliquer la fonction scale uniquement sur les variables prédictives (exclure 'Claim')
+test_set_scaled <- test_set %>%
+  select(-Claim) %>%  # Exclure la variable cible
+  scale() %>%         # Standardiser les autres variables
+  as.data.frame()
+
+train_set_scaled$Claim <- train_set$Claim
+test_set_scaled$Claim <- test_set$Claim
+
+
+```
+Les modèles choisis sont des modèles de comptage (sauf le lm mais il sert uniquement de baseline)
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(Metrics)
+library(MASS) 
+library(tweedie)  
+library(statmod)
+library(glmnet)
+library(stats)
+# Train and evaluate models
+
+# 1. Linear Regression
+lm_model <- lm(Claim ~ ., data = train_set_scaled)
+lm_predictions <- predict(lm_model, newdata = test_set_scaled)
+lm_predictions_class <- round(lm_predictions)  # Round to nearest integer for class prediction
+rmse_lm <- rmse_c(test_set_scaled$Claim, lm_predictions_class)
+
+# 2. Poisson GLM
+glm_model <- glm(Claim ~ ., data = train_set_scaled, family = poisson(link = "log"))
+glm_predictions <- predict(glm_model, newdata = test_set_scaled, type = "response")
+glm_predictions_class <- round(glm_predictions)  # Round to nearest integer for class prediction
+rmse_glm <- rmse_c(test_set_scaled$Claim, glm_predictions_class)
+
+# 3. Negative Binomial GLM
+negbin_model <- glm.nb(Claim ~ ., data = train_set_scaled)
+negbin_predictions <- predict(negbin_model, newdata = test_set_scaled, type = "response")
+negbin_predictions_class <- round(negbin_predictions)  # Round to nearest integer for class prediction
+rmse_negbin <- rmse_c(test_set_scaled$Claim, negbin_predictions_class)
+
+# 4. Tweedie GLM
+tweedie_model <- glm(Claim ~ ., data = train_set_scaled, family = statmod::tweedie(var.power = 1.5, link.power = 0))
+tweedie_predictions <- predict(tweedie_model, newdata = test_set_scaled, type = "response")
+tweedie_predictions_class <- round(tweedie_predictions)  # Round to nearest integer for class prediction
+rmse_tweedie <- rmse_c(test_set_scaled$Claim, tweedie_predictions_class)
+```
+```{r}
+length(lm_predictions_class)
+str(test_set)
 ```
 
 
 ```{r}
+# Display results
+rmse_results <- data.frame(
+  Model = c("Linear Regression", "Poisson GLM", "Negative Binomial GLM", "Tweedie GLM"),
+  RMSE_C = c(rmse_lm, rmse_glm, rmse_negbin, rmse_tweedie)
+)
 
+print(rmse_results)
 ```
 
 ```{r}
-
+summary(test_set)
 ```
+
+
+
+
+
+# Charger les packages nécessaires
+library(caret)
+library(Metrics)
+library(glmnet)
+
+# Définition de la fonction RMSE combiné
+rmse_c <- function(y, yhat) {
+  # Définition des classes
+  C_1 <- which(y %in% c(0, 1))
+  C_2 <- which(y == 2)
+  C_3 <- which(y == 3)
+  C_4 <- which(y > 3)
+  
+  # Calcul des RMSE par classe (en évitant les erreurs si une classe est vide)
+  rmse_1 <- ifelse(length(C_1) > 0, rmse(y[C_1], yhat[C_1]), NA)
+  rmse_2 <- ifelse(length(C_2) > 0, rmse(y[C_2], yhat[C_2]), NA)
+  rmse_3 <- ifelse(length(C_3) > 0, rmse(y[C_3], yhat[C_3]), NA)
+  rmse_4 <- ifelse(length(C_4) > 0, rmse(y[C_4], yhat[C_4]), NA)
+  
+  # Calcul du RMSE combiné (en ignorant les valeurs NA)
+  RMSE_C <- mean(c(rmse_1, rmse_2, rmse_3, rmse_4), na.rm = TRUE)
+  
+  return(RMSE_C)
+}
+
+# Définition des paramètres de la validation croisée
+ctrl <- trainControl(method = "cv", number = 5, savePredictions = "final")  
+
+# Entraînement des modèles avec validation croisée
+lm_cv <- train(Claim ~ ., data = train_set, method = "lm", trControl = ctrl)
+glm_cv <- train(Claim ~ ., data = train_set, method = "glm", family = poisson(), trControl = ctrl)
+ridge_cv <- train(Claim ~ ., data = train_set, method = "glmnet", trControl = ctrl, tuneGrid = expand.grid(alpha = 0, lambda = seq(0.01, 10, length = 50)))
+lasso_cv <- train(Claim ~ ., data = train_set, method = "glmnet", trControl = ctrl, tuneGrid = expand.grid(alpha = 1, lambda = seq(0.01, 10, length = 50)))
+
+# Récupération des prédictions finales pour chaque modèle
+pred_lm <- lm_cv$pred$pred
+pred_glm <- glm_cv$pred$pred
+pred_ridge <- ridge_cv$pred$pred
+pred_lasso <- lasso_cv$pred$pred
+
+# Calcul des RMSE combinés pour chaque modèle
+rmse_lm <- rmse_c(train_set$Claim, pred_lm)
+rmse_glm <- rmse_c(train_set$Claim, pred_glm)
+rmse_ridge <- rmse_c(train_set$Claim, pred_ridge)
+rmse_lasso <- rmse_c(train_set$Claim, pred_lasso)
+
+# Affichage des résultats
+rmse_results <- data.frame(
+  Model = c("Linear Regression", "Poisson GLM", "Ridge Regression", "Lasso Regression"),
+  RMSE_C = c(rmse_lm, rmse_glm, rmse_ridge, rmse_lasso)
+)
+
+print(rmse_results)
+
+# Load necessary libraries
+library(caret)
+library(Metrics)
+library(glmnet)
+library(MASS)       # For negative binomial GLM
+library(tweedie)    # For Tweedie GLM
+library(doParallel) # For parallel processing (optional, to speed up computations)
+
+# Register parallel backend (optional)
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+# Define the combined RMSE function
+rmse_c <- function(y, yhat) {
+  # Define classes
+  C_1 <- which(y %in% c(0, 1))
+  C_2 <- which(y == 2)
+  C_3 <- which(y == 3)
+  C_4 <- which(y > 3)
+  
+  # Calculate RMSE for each class (avoid errors if a class is empty)
+  rmse_1 <- ifelse(length(C_1) > 0, rmse(y[C_1], yhat[C_1]), NA)
+  rmse_2 <- ifelse(length(C_2) > 0, rmse(y[C_2], yhat[C_2]), NA)
+  rmse_3 <- ifelse(length(C_3) > 0, rmse(y[C_3], yhat[C_3]), NA)
+  rmse_4 <- ifelse(length(C_4) > 0, rmse(y[C_4], yhat[C_4]), NA)
+  
+  # Calculate combined RMSE (ignoring NA values)
+  RMSE_C <- mean(c(rmse_1, rmse_2, rmse_3, rmse_4), na.rm = TRUE)
+  
+  return(RMSE_C)
+}
+
+# Define stratified cross-validation folds
+folds <- createFolds(train_set$Claim, k = 5)  # 5-fold stratified CV
+
+# Define cross-validation settings with stratified folds
+ctrl <- trainControl(method = "cv", number = 5, index = folds, savePredictions = "final", allowParallel = TRUE)
+
+# Define a grid for elasticnet (alpha = 0 for ridge, alpha = 1 for lasso, in-between for elasticnet)
+elasticnet_grid <- expand.grid(alpha = seq(0, 1, length = 5), lambda = seq(0, 10, length = 5))
+
+# Train models with stratified cross-validation
+
+# 1. Linear Regression
+lm_cv <- train(Claim ~ ., data = train_set, method = "lm", trControl = ctrl)
+
+# 2. Poisson GLM
+poisson_cv <- train(Claim ~ ., data = train_set, method = "glm", family = poisson(), trControl = ctrl)
+
+# 3. Negative Binomial GLM
+negbin_cv <- train(Claim ~ ., data = train_set, method = "glm.nb", trControl = ctrl)
+
+# 4. Tweedie GLM
+#tweedie_cv <- train(Claim ~ ., data = train_set, method = "glm", 
+#                    family = tweedie(var.power = 1.5, link.power = 0), trControl = ctrl)
+
+# 5. Elasticnet for Linear Regression
+elasticnet_lm <- train(Claim ~ ., data = train_set, method = "glmnet", 
+                       trControl = ctrl, tuneGrid = elasticnet_grid)
+
+# 6. Elasticnet for Poisson GLM
+elasticnet_poisson <- train(Claim ~ ., data = train_set, method = "glmnet", 
+                            family = "poisson", trControl = ctrl, tuneGrid = elasticnet_grid)
+
+# 7. Elasticnet for Negative Binomial GLM
+elasticnet_negbin <- train(Claim ~ ., data = train_set, method = "glmnet", 
+                           family = "negbinomial", trControl = ctrl, tuneGrid = elasticnet_grid)
+
+# 8. Elasticnet for Tweedie GLM
+#elasticnet_tweedie <- train(Claim ~ ., data = train_set, method = "glmnet", 
+#                            family = tweedie(var.power = 1.5, link.power = 0), 
+#                            trControl = ctrl, tuneGrid = elasticnet_grid)
+
+# Stop parallel backend (if used)
+stopCluster(cl)
+
+# Extract predictions for each model
+pred_lm <- predict(lm_cv, newdata = train_set)
+pred_poisson <- predict(poisson_cv, newdata = train_set)
+pred_negbin <- predict(negbin_cv, newdata = train_set)
+pred_tweedie <- predict(tweedie_cv, newdata = train_set)
+pred_elasticnet_lm <- predict(elasticnet_lm, newdata = train_set)
+pred_elasticnet_poisson <- predict(elasticnet_poisson, newdata = train_set)
+pred_elasticnet_negbin <- predict(elasticnet_negbin, newdata = train_set)
+#pred_elasticnet_tweedie <- predict(elasticnet_tweedie, newdata = train_set)
+
+# Compute combined RMSE for each model
+rmse_lm <- rmse_c(train_set$Claim, pred_lm)
+rmse_poisson <- rmse_c(train_set$Claim, pred_poisson)
+rmse_negbin <- rmse_c(train_set$Claim, pred_negbin)
+rmse_tweedie <- rmse_c(train_set$Claim, pred_tweedie)
+rmse_elasticnet_lm <- rmse_c(train_set$Claim, pred_elasticnet_lm)
+rmse_elasticnet_poisson <- rmse_c(train_set$Claim, pred_elasticnet_poisson)
+
+
+
+#rmse_elasticnet_negbin <- rmse_c(train_set$Claim, pred_elasticnet_negbin)
+#rmse_elasticnet_tweedie <- rmse_c(train_set$Claim, pred_elasticnet_tweedie)
+
+# Display results
+rmse_results <- data.frame(
+  Model = c("Linear Regression", "Poisson GLM", "Negative Binomial GLM", "Tweedie GLM",
+            "Elasticnet Linear", "Elasticnet Poisson"),
+  RMSE_C = c(rmse_lm, rmse_poisson, rmse_negbin, rmse_tweedie,
+             rmse_elasticnet_lm, rmse_elasticnet_poisson)
+)
+
+print(rmse_results)
+
+
+
+
+
+
 
 

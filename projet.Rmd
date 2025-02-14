@@ -1,0 +1,261 @@
+---
+title: "Polices d'assurance"
+author: "Idriss Louzi, Martin Youssef, Alex Irani, Théophile Schmutz"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    
+    # Overall theme
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    
+    # Table of contents
+    number_sections: true
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE,warning=FALSE}
+library(rmarkdown)
+library(dplyr)
+library(caret)
+library(kableExtra)
+library(ggplot2)
+library(broom)
+
+set.seed(2025)
+custom <- trainControl(
+  method = 'repeatedcv',
+  number = 5,  # Using 5-fold cross-validation
+  repeats = 3,  # Repeating 3 times for robustness
+  summaryFunction = defaultSummary,  # Default metrics (RMSE, MAE)
+  allowParallel = TRUE  # Use parallel processing if resources allow
+)
+```
+
+# Données
+
+```{r}
+data<-read.csv('train_set.csv', header = T, sep = ",",dec=".")
+train_index <- createDataPartition(data$Claim, p = 0.7, list = FALSE)
+train <- data[train_index,]
+paged_table(train)
+```
+
+```{r}
+summary(data)
+```
+
+Comment est distribuée la variable target ?
+
+```{r}
+ggplot(data, aes(x = factor(Claim))) +
+  geom_bar(aes(y = after_stat(prop), group = 1), fill = "lightgray", color = "black") +
+  geom_text(aes(y = after_stat(prop), label = ..count.., group = 1),  
+            stat = "count", 
+            vjust = -0.1, size = 5) +  
+  labs(title = "Proportion et nombre des polices d'assurance",
+       x = "Claim", y = "Proportion") +
+  scale_y_continuous(labels = function(x) scales::percent(x)) + 
+  theme_minimal()
+```
+
+Beaucoup de valeurs extrêmes.
+On peut essayer de voir si des variables très liées. 
+
+# Visualisation
+
+On peut se focus dans un premier temps sur les données liées au conducteur.
+
+## Focus sur le conducteur
+
+La première chose qu'on pourrait se dire c'est que les conducteurs plus jeunes ont plus d'accidents.
+Il est alors intéressant de voir la relation entre le nombre de police et l'âge du conducteur.
+
+Nous allons dans un premier temps segmenter les âges
+
+```{r}
+data$TrancheAge <- cut(data$Age, 
+                        breaks = c(-Inf, 25, 35, 45, 55, 65, 110), 
+                        labels = c("Moins de 25 ans", "25-34 ans", "35-44 ans", 
+                                   "45-54 ans", "55-64 ans", "65 ans et plus"), 
+                        right = FALSE)
+
+stat_TrancheAge <- data %>%
+  group_by(TrancheAge) %>%
+  summarise(Nombre = n())
+stat_TrancheAge$Proportion <- stat_TrancheAge$Nombre / dim(data)[1]
+
+ggplot(stat_TrancheAge, aes(x = TrancheAge, y = Proportion)) +
+  geom_bar(stat = "identity", fill = "lightblue", color = "black") +
+  geom_text(aes(y = Proportion, label = Nombre, group = 1), vjust = -0.1, size = 5) + 
+  labs(title = "Répartition des individus par tranche d'âge",
+       x = "Tranche d'âge", y = "Proportion") +
+  scale_y_continuous(labels = function(x) scales::percent(x)) +
+  theme_minimal()
+```
+
+On ne peut pas vraiment comparer le nombre de Claim par tranche d'âge car il n'y a pas autant d'individus par tranche d'âge. On regarde donc les claims "normalisées" par le nombre d'individu de la tranche d'âge.
+
+```{r}
+ggplot(data, aes(x = factor(Claim))) +  
+  geom_bar(aes(y = ..prop.., group = 1), fill = "lightgray", color = "black") +
+  facet_wrap(~ TrancheAge, ncol=3) +
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims par Tranche d'Âge"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+Comme on l'a vu tout à l'heure il y a beaucoup d'individus avec des claims nuls. On peut alors filtrer les données pour seulement s'intéresser aux claims non nul.
+
+```{r}
+ggplot(data %>% filter(Claim > 0), aes(x = factor(Claim))) +  
+  geom_bar(fill = "lightgray", color = "black") +
+  facet_wrap(~ TrancheAge, ncol=3) +  
+  labs(
+    x = "Nombre de Claims",
+    y = "Nombre d'individus",
+    title = "Zoom: Répartitions des Claims non nul par Tranche d'Âge",
+  ) +
+  theme_minimal()
+```
+
+```{r}
+data <- data %>%
+  mutate(TrancheBonus_Malus = case_when(
+    Bonus_Malus < 100 ~ "Bonus",
+    Bonus_Malus == 100 ~ "Neutre",         # 100 = pas de bonus, pas de malus
+    Bonus_Malus > 100 & Bonus_Malus <= 150 ~ "Malus modéré",
+    Bonus_Malus > 150 & Bonus_Malus <= 250 ~ "Malus élevé",
+    Bonus_Malus > 250 & Bonus_Malus <= 350 ~ "Malus très élevé",
+    TRUE ~ "Erreur" 
+  ))
+
+data_counts <- data %>%
+  group_by(TrancheBonus_Malus, Claim) %>%
+  summarise(Nombre = n(), .groups = "drop") %>%
+  group_by(TrancheBonus_Malus) %>%
+  mutate(Proportion = Nombre / sum(Nombre)) 
+
+ggplot(data_counts, aes(x = factor(Claim), y = Proportion)) +  
+  geom_bar(stat = "identity", fill = "lightgray", color = "black") +  
+  geom_text(aes(label = Nombre), vjust = -0.5, size = 3) +  
+  facet_wrap(~ TrancheBonus_Malus, scales = "free_y") +  
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims par Tranche Bonus/Malus"
+  ) +
+  scale_y_continuous(labels = scales::percent) + 
+  theme_minimal()
+```
+
+
+## Focus sur la voiture
+Les variables liés à la géographie: `Car_Power`, `Car_Age`, `Car_Model` et `Car_Fuel`.
+
+Regarder si la puissance de la voiture peut expliquer les claims. On peut penser que les voitures avec les plus grandes puissances auraient plus tendance à avoir des accifents:
+```{r}
+data <- data %>%
+  mutate(TrancheCar_Power = case_when(
+    Car_Power <= 6 ~ "Puissance --",
+    Car_Power > 6 & Car_Power <= 10 ~ "Puissance -",
+    Car_Power > 10 & Car_Power <= 12 ~ "Puissance +",
+    Car_Power > 12 & Car_Power <= 15 ~ "Puissance ++",
+    TRUE ~ "Erreur" 
+  ))
+
+data_counts <- data %>%
+  group_by(TrancheCar_Power, Claim) %>%
+  summarise(Nombre = n(), .groups = "drop") %>%
+  group_by(TrancheCar_Power) %>%
+  mutate(Proportion = Nombre / sum(Nombre)) 
+
+ggplot(data_counts, aes(x = factor(Claim), y = Proportion)) +  
+  geom_bar(stat = "identity", fill = "lightgray", color = "black") +  
+  geom_text(aes(label = Nombre), vjust = -0.5, size = 3) +  
+  facet_wrap(~ TrancheCar_Power, scales = "free_y") +  
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims selon la puissance de la voiture"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+```{r}
+data_counts <- data %>%
+  filter(Claim > 0) %>%
+  group_by(Car_Model, Claim) %>%
+  summarise(Nombre = n(), .groups = "drop") %>%
+  group_by(Car_Model) %>%
+  mutate(Proportion = Nombre / sum(Nombre))
+
+ggplot(data_counts, aes(x = factor(Claim), y = Proportion)) +  
+  geom_bar(stat = "identity", fill = "lightgray", color = "black") +  
+  geom_text(aes(label = Nombre), vjust = -0.5, size = 3) +  
+  facet_wrap(~ Car_Model, ncol=3) +
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims non nuls selon le modèle de la voiture"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+
+## Focus sur les facteurs géographiques
+
+Les variables liés à la géographie: `Urban_rural_class`, `Inhab_density` et `French_region`
+
+```{r}
+ggplot(data, aes(x = Inhab_density, y = Claim)) +  
+  geom_point(size=0.2) +
+  facet_wrap( ~ French_region, ncol=5) +
+  labs(
+    x="Âge du conducteur",
+    y="Nombre de Claim",
+    title="Nombre de Claim du conducteur en fonction de son Âge",
+    subtitle="selon le puissance de la voiture",
+  ) +
+  theme_minimal()
+```
+
+# Modèles
+
+```{r}
+mod.linear <- train(Claim~., train,
+                  method='lm',
+                  preProc = c("center", "scale"),
+                  trControl=custom)
+mod.linear$results
+```
+
+```{r}
+summary(mod.linear) %>% coefficients() %>% kbl()
+```
+
+## Validation
+
+```{r}
+
+```
+
+

@@ -265,6 +265,7 @@ Peut-être penser à supprimer les régions (par bon sens, ce qui est fortement 
 
 ## Corrélation
 
+Variable numérique:
 ```{r}
 
 temp <- data
@@ -274,31 +275,6 @@ temp %>%
   ggcorr(, label = TRUE, label_round = 2, hjust = 0.8) +
   labs(title = "Matrice de corrélation des variables numériques")
 ```
-```{r}
-ggcorr(nba[, 2:15], geom = "blank", label = TRUE, hjust = 0.75) +
-  geom_point(size = 10, aes(color = coefficient > 0, alpha = abs(coefficient) > 0.5)) +
-  scale_alpha_manual(values = c("TRUE" = 0.25, "FALSE" = 0)) +
-  guides(color = FALSE, alpha = FALSE)
-```
+Variable catégorielle
 
 
-
-# Modèles
-
-```{r}
-mod.linear <- train(Claim~., train,
-                  method='lm',
-                  preProc = c("center", "scale"),
-                  trControl=custom)
-mod.linear$results
-```
-
-```{r}
-summary(mod.linear) %>% coefficients() %>% kbl()
-```
-
-## Validation
-
-```{r}
-
-```

@@ -275,6 +275,49 @@ temp %>%
   ggcorr(, label = TRUE, label_round = 2, hjust = 0.8) +
   labs(title = "Matrice de corrélation des variables numériques")
 ```
-Variable catégorielle
+Variable catégorielle. 
+
+Nous avons évalué les relations entre des variables catégorielles en calculant le V de Cramer, une mesure dérivée du test du Chi-2 qui quantifie la force de l'association entre deux variables qualitatives, avec des valeurs variant de 0 (aucune association) à 1 (association parfaite). Le test du Chi-2 évalue l'existence d'une association entre deux variables catégorielles en testant l'hypothèse nulle d'indépendance. Cependant, il ne fournit pas d'indication sur la force de cette association. C'est là qu'intervient le V de Cramer, qui quantifie l'intensité de la relation entre les variables, avec des valeurs variant de 0 (aucune association) à 1 (association parfaite). Ainsi, même si le test du Chi-2 révèle une association statistiquement significative, le V de Cramer permet de déterminer si cette association est faible ou forte. Par exemple, une grande taille d'échantillon peut conduire à une p-valeur significative au test du Chi-2 pour une association faible, ce que le V de Cramer aidera à clarifier.
+```{r}
+library(rcompanion)
+
+temp <- data
+temp <- temp %>% 
+  dplyr::select(-PolID) %>% 
+  dplyr::select_if(~ !is.numeric(.)) 
+
+cramers_v_matrix <- function(df) {
+  cols <- colnames(df)
+  n <- length(cols)
+  v_matrix <- matrix(NA, n, n, dimnames = list(cols, cols))
+  
+  for (i in 1:n) {
+    for (j in i:n) {
+      tbl <- table(df[[cols[i]]], df[[cols[j]]])
+      v <- cramerV(tbl, bias.correct = TRUE)  
+      #v_matrix[i, j] <- v
+      v_matrix[j, i] <- v
+    }
+  }
+  return(as.data.frame(v_matrix))
+}
+
+result_v <- cramers_v_matrix(temp)
+result_v
+```
+```{r}
+# Convertir le data frame en matrice
+v_matrix <- as.matrix(result_v)
+v_long <- melt(v_matrix)
+
+ggplot(v_long, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +  #
+  geom_text(aes(label = round(value, 2)), color = "white", size = 4) +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "red", midpoint = 0.5) +
+  theme_minimal() +
+  labs(title = "Matrice de corrélation (V de Cramer)", fill = "CramerV") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+D'après la heatmap précédente, on observe peu de dépendances fortes, ce qui signifie que la majorité des variables catégorielles sont relativement indépendantes les unes des autres. Ainsi, d'un point de vue statistique il peut être intéressant de toutes les garder.
 
 

@@ -1,0 +1,596 @@
+---
+title: "Polices d'assurance"
+author: "Idriss Louzi, Martin Youssef, Alex Irani, Théophile Schmutz"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    
+    # Overall theme
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    
+    # Table of contents
+    number_sections: true
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(rmarkdown)
+library(dplyr)
+library(caret)
+library(kableExtra)
+library(ggplot2)
+library(broom)
+library(tidyr)
+library(GGally)
+library(glmnet)
+library(rcompanion)
+library(reshape2)
+library(caret)
+library(MASS)
+library(Metrics)
+library(tibble)
+
+set.seed(2025)
+custom <- trainControl(
+  method = 'repeatedcv',
+  number = 5,  # Using 5-fold cross-validation
+  repeats = 3,  # Repeating 3 times for robustness
+  summaryFunction = defaultSummary,  # Default metrics (RMSE, MAE)
+  allowParallel = TRUE  # Use parallel processing if resources allow
+)
+
+rmse_c <- function(actuals, predictions) {
+  # Définition des classes
+  C_1 <- which(actuals %in% c(0, 1))
+  C_2 <- which(actuals == 2)
+  C_3 <- which(actuals == 3)
+  C_4 <- which(actuals > 3)
+  
+  # Calcul du RMSE pour chaque classe (en évitant les erreurs si une classe est vide)
+  rmse_1 <- rmse(actuals[C_1], predictions[C_1]) 
+  rmse_2 <- rmse(actuals[C_2], predictions[C_2]) 
+  rmse_3 <- rmse(actuals[C_3], predictions[C_3]) 
+  rmse_4 <- rmse(actuals[C_4], predictions[C_4]) 
+  
+  # Combinaison des RMSE (en ignorant les valeurs NA)
+  rmse_values <- c(rmse_1, rmse_2, rmse_3, rmse_4)
+  RMSE_C <- mean(rmse_values, na.rm = TRUE)  # Moyenne des RMSE valides
+  
+  # Affichage des résultats
+  cat("RMSE_1 (classe très fréquente) :", rmse_1, "\n")
+  cat("RMSE_2 (classe fréquente) :", rmse_2, "\n")
+  cat("RMSE_3 (classe rare) :", rmse_3, "\n")
+  cat("RMSE_4 (classe très rare) :", rmse_4, "\n")
+  cat("RMSE combiné (RMSE_C) :", RMSE_C, "\n")
+  
+  return(RMSE_C)
+}
+```
+
+# Données
+
+```{r}
+data <-read.csv('train_set.csv', header = T, sep = ",",dec=".")
+data <- data %>% dplyr::select(-PolID)
+train_index <- createDataPartition(data$Claim, p = 0.7, list = FALSE)
+train <- data[train_index,]
+paged_table(train)
+```
+
+```{r}
+summary(data)
+```
+
+Comment est distribuée la variable target ?
+
+```{r}
+ggplot(data, aes(x = factor(Claim))) +
+  geom_bar(aes(y = after_stat(prop), group = 1), fill = "steelblue", color = "black") +
+  geom_text(aes(y = after_stat(prop), label = ..count.., group = 1),  
+            stat = "count", 
+            vjust = -0.1, size = 5) +  
+  labs(title = "Répartition des sinistres",
+       x = "Claim", y = "Proportion") +
+  scale_y_continuous(labels = function(x) scales::percent(x)) + 
+  theme_minimal()
+```
+
+Classes très très imbalanced.
+
+## Sanity check
+
+Vérification des valeurs manquantes
+
+```{r}
+missing_values <- train %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Column", values_to = "Valeurs Manquantes")
+missing_values
+```
+
+Vérification des doublons
+
+```{r}
+train <- train %>% distinct()
+```
+
+# Visualisation
+
+On peut se focus dans un premier temps sur les données liées au conducteur.
+
+## Focus sur le conducteur
+
+Les variables liés à l'individu/le contrat : `Period_Exp`, `Age`, `Bonus_Malus` et `Car_Fuel`. A noter qu'a priori un nouveau client sera considéré comme neutre en terme de `Bonus_Manus`. Ainsi, pour un soucis de réalisme on pourrait essayer de mieux modéliser les neutres que les autres afin de moins se tromper sur la tarification des nouveaux clients. La variable `Period_Exp` ne serait a priori pas utilisable car inobservable pour un nouveau client. A noter que dans le test_set ces deux variables figurent donc on n'implémentera pas ces deux remarques.
+
+La première chose qu'on pourrait se dire c'est que les conducteurs plus jeunes ont plus d'accidents.
+Il est alors intéressant de voir la relation entre le nombre de police et l'âge du conducteur.
+
+Nous allons dans un premier temps segmenter les âges
+
+```{r}
+data$TrancheAge <- cut(data$Age, 
+                        breaks = c(-Inf, 25, 35, 45, 55, 65, 110), 
+                        labels = c("Moins de 25 ans", "25-34 ans", "35-44 ans", 
+                                   "45-54 ans", "55-64 ans", "65 ans et plus"), 
+                        right = FALSE)
+
+stat_TrancheAge <- data %>%
+  group_by(TrancheAge) %>%
+  summarise(Nombre = n())
+stat_TrancheAge$Proportion <- stat_TrancheAge$Nombre / dim(data)[1]
+
+ggplot(stat_TrancheAge, aes(x = TrancheAge, y = Proportion)) +
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +
+  geom_text(aes(y = Proportion, label = Nombre, group = 1), vjust = -0.1, size = 5) + 
+  labs(title = "Répartition des individus par tranche d'âge",
+       x = "Tranche d'âge", y = "Proportion") +
+  scale_y_continuous(labels = function(x) scales::percent(x)) +
+  theme_minimal()
+```
+
+On ne peut pas vraiment comparer le nombre de Claim par tranche d'âge car il n'y a pas autant d'individus par tranche d'âge.
+On regarde donc les claims "normalisées" par le nombre d'individu de la tranche d'âge.
+
+```{r}
+ggplot(data, aes(x = factor(Claim))) +  
+  geom_bar(aes(y = ..prop.., group = 1), fill = "steelblue", color = "black") +
+  facet_wrap(~ TrancheAge, ncol=3) +
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims par Tranche d'Âge"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+Dans chaque tranche d'âge il y a les mêmes répartitions de claims. Avec une très grosse majorité (~90%) avec 0 claim, puis ~5% de 1 claim.
+
+Comme on l'a vu tout à l'heure il y a beaucoup d'observations avec des claims nuls.
+On peut alors filtrer les données pour seulement s'intéresser aux claims non nul.
+
+```{r}
+ggplot(data %>% filter(Claim > 0), aes(x = factor(Claim))) +  
+  geom_bar(fill = "steelblue", color = "black") +
+  facet_wrap(~ TrancheAge, ncol=3) +  
+  labs(
+    x = "Nombre de Claims",
+    y = "Nombre d'individus",
+    title = "Zoom: Répartitions des Claims non nul par Tranche d'Âge",
+  ) +
+  theme_minimal()
+```
+On confirme bien ce qu'on a observé précédemment. 
+
+```{r}
+data <- data %>%
+  mutate(TrancheBonus_Malus = case_when(
+    Bonus_Malus < 100 ~ "Bonus",
+    Bonus_Malus == 100 ~ "Neutre",         # 100 = pas de bonus, pas de malus
+    Bonus_Malus > 100 & Bonus_Malus <= 150 ~ "Malus modéré",
+    Bonus_Malus > 150 & Bonus_Malus <= 250 ~ "Malus élevé",
+    Bonus_Malus > 250 & Bonus_Malus <= 350 ~ "Malus très élevé",
+    TRUE ~ "Erreur" 
+  ))
+
+data_counts <- data %>%
+  group_by(TrancheBonus_Malus, Claim) %>%
+  summarise(Nombre = n(), .groups = "drop") %>%
+  group_by(TrancheBonus_Malus) %>%
+  mutate(Proportion = Nombre / sum(Nombre)) 
+
+ggplot(data_counts, aes(x = factor(Claim), y = Proportion)) +  
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +  
+  geom_text(aes(label = Nombre), vjust = -0.5, size = 3) +  
+  facet_wrap(~ TrancheBonus_Malus, scales = "free_y") +  
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims par Tranche Bonus/Malus"
+  ) +
+  scale_y_continuous(labels = scales::percent) + 
+  theme_minimal()
+```
+
+## Focus sur la voiture
+
+Les variables liés à la géographie: `Car_Power`, `Car_Age`, `Car_Model` et `Car_Fuel`.
+
+Regarder si la puissance de la voiture peut expliquer les claims.
+On peut penser que les voitures avec les plus grandes puissances auraient plus tendance à avoir des accifents:
+
+```{r}
+data <- data %>%
+  mutate(TrancheCar_Power = case_when(
+    Car_Power <= 6 ~ "Puissance --",
+    Car_Power > 6 & Car_Power <= 10 ~ "Puissance -",
+    Car_Power > 10 & Car_Power <= 12 ~ "Puissance +",
+    Car_Power > 12 ~ "Puissance ++",
+    TRUE ~ "Erreur" 
+  ))
+
+data_counts <- data %>%
+  group_by(TrancheCar_Power, Claim) %>%
+  summarise(Nombre = n(), .groups = "drop") %>%
+  group_by(TrancheCar_Power) %>%
+  mutate(Proportion = Nombre / sum(Nombre)) 
+
+ggplot(data_counts, aes(x = factor(Claim), y = Proportion)) +  
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +  
+  geom_text(aes(label = Nombre), vjust = -0.5, size = 3) +  
+  facet_wrap(~ TrancheCar_Power, scales = "free_y") +  
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims selon la puissance de la voiture"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+```{r}
+data_counts <- data %>%
+  filter(Claim > 0) %>%
+  group_by(Car_Model, Claim) %>%
+  summarise(Nombre = n(), .groups = "drop") %>%
+  group_by(Car_Model) %>%
+  mutate(Proportion = Nombre / sum(Nombre))
+
+ggplot(data_counts, aes(x = factor(Claim), y = Proportion)) +  
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +  
+  geom_text(aes(label = Nombre), vjust = -0.5, size = 3) +  
+  facet_wrap(~ Car_Model, ncol=3) +
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims non nuls selon le modèle de la voiture"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+`Car_Fuel` n'est pas vraiment pertinente.
+
+## Focus sur les facteurs géographiques
+
+Les variables liés à la géographie: `Urban_rural_class`, `Inhab_density` et `French_region`
+
+```{r}
+ggplot(data, aes(x = French_region, y = Inhab_density, fill = French_region)) +
+  geom_boxplot() +
+  labs(title = "Densité d’habitants par région", x = "Région", y = "Densité (hab/km²)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+```
+Grande distribution de densités en IDF, penser à rajouter une colonne qui contient la moyenne pour chaque ville pour estomper cet effet.
+
+Peut-être penser à supprimer les régions (par bon sens, ce qui est fortement impactant sur le nb de sinistres est la densité d'habitants et non pas la région). 
+
+```{r}
+data_counts <- data %>%
+  group_by(Urban_rural_class, Claim) %>%
+  summarise(Nombre = n(), .groups = "drop") %>%
+  group_by(Urban_rural_class) %>%
+  mutate(Proportion = Nombre / sum(Nombre)) 
+
+ggplot(data_counts, aes(x = factor(Claim), y = Proportion)) +  
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +  
+  geom_text(aes(label = Nombre), vjust = -0.5, size = 3) +  
+  facet_wrap(~ Urban_rural_class, scales = "free_y") +  
+  labs(
+    x = "Nombre de Claims",
+    y = "Proportion",
+    title = "Répartition des Claims selon la densité d'habitants"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+## Corrélation
+
+Variable numérique:
+```{r}
+temp <- data
+temp %>% 
+  select_if(is.numeric) %>%
+  ggcorr(, label = TRUE, label_round = 2, hjust = 0.8) +
+  labs(title = "Matrice de corrélation des variables numériques")
+```
+Variable catégorielle. 
+
+Nous avons évalué les relations entre des variables catégorielles en calculant le V de Cramer, une mesure dérivée du test du Chi-2 qui quantifie la force de l'association entre deux variables qualitatives, avec des valeurs variant de 0 (aucune association) à 1 (association parfaite). Le test du Chi-2 évalue l'existence d'une association entre deux variables catégorielles en testant l'hypothèse nulle d'indépendance. Cependant, il ne fournit pas d'indication sur la force de cette association. C'est là qu'intervient le V de Cramer, qui quantifie l'intensité de la relation entre les variables, avec des valeurs variant de 0 (aucune association) à 1 (association parfaite). Ainsi, même si le test du Chi-2 révèle une association statistiquement significative, le V de Cramer permet de déterminer si cette association est faible ou forte. Par exemple, une grande taille d'échantillon peut conduire à une p-valeur significative au test du Chi-2 pour une association faible, ce que le V de Cramer aidera à clarifier.
+```{r}
+temp <- data
+temp <- temp %>% 
+  dplyr::select_if(~ !is.numeric(.)) 
+
+cramers_v_matrix <- function(df) {
+  cols <- colnames(df)
+  n <- length(cols)
+  v_matrix <- matrix(NA, n, n, dimnames = list(cols, cols))
+  
+  for (i in 1:n) {
+    for (j in i:n) {
+      tbl <- table(df[[cols[i]]], df[[cols[j]]])
+      v <- cramerV(tbl, bias.correct = TRUE)  
+      #v_matrix[i, j] <- v
+      v_matrix[j, i] <- v
+    }
+  }
+  return(as.data.frame(v_matrix))
+}
+
+result_v <- cramers_v_matrix(temp)
+result_v
+```
+
+```{r}
+# Convertir le data frame en matrice
+v_matrix <- as.matrix(result_v)
+v_long <- melt(v_matrix)
+
+ggplot(v_long, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +  #
+  geom_text(aes(label = round(value, 2)), color = "white", size = 4) +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "red", midpoint = 0.5) +
+  theme_minimal() +
+  labs(title = "Matrice de corrélation (V de Cramer)", fill = "CramerV") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+D'après la heatmap précédente, on observe peu de dépendances fortes, ce qui signifie que la majorité des variables catégorielles sont relativement indépendantes les unes des autres. Ainsi, d'un point de vue statistique il peut être intéressant de toutes les garder.
+
+# Modélisation
+
+```{r}
+train.index <- createDataPartition(data$Claim, p = .7, list = FALSE)
+train <- data[ train.index,] 
+test  <- data[-train.index,]
+
+# Préparer les données d'entraînement
+x_train <- train %>% 
+  dplyr::select(-Claim) %>%
+  dplyr::select_if(is.numeric) %>%
+  as.matrix()
+y_train <- train$Claim
+
+# Préparer les données de test
+x_test <- test %>% 
+  dplyr::select(-Claim) %>%
+  dplyr::select_if(is.numeric) %>%
+  as.matrix()
+y_test <- test$Claim
+```
+
+## Model A: Simple case
+Avec simplement les données comme tel:
+```{r}
+model.complet <- lm(Claim~., data=train)
+summary(model.complet)$coefficients %>%
+  round(4) %>%
+  kbl() %>%
+  kable_styling(full_width = FALSE,)
+```
+
+
+
+```{r}
+anova(model.complet)
+```
+```{r}
+y_pred <- predict(model.complet, test %>%  dplyr::select(-Claim))
+metrics_complet <- tibble(
+  RMSE_C = rmse_c(y_test, y_pred),
+  MSE = mean((y_test - y_pred)^2),
+  RMSE = rmse(y_test, y_pred),
+  R2 = R2(y_pred, y_test)
+)
+
+metrics_complet %>%
+  kbl(digits = 3) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+## Model B: BIC Forward selection
+Avec forward selection
+```{r}
+n <- dim(data)[1]
+model.forward <- stepAIC(model.complet, Claim ~ ., trace=TRUE, k=log(n), direction="forward")
+summary(model.forward)$coefficients %>%
+  round(4) %>%
+  kbl() %>%
+  kable_styling(full_width = FALSE)
+```
+
+## Model C: Lasso
+```{r}
+grid = 10^seq(0,-3,length=100)
+
+model.lasso <- cv.glmnet(
+  x_train, y_train, 
+  alpha = 1, 
+  lambda = grid, 
+  preProc = c("center", "scale"),
+  method = "glmnet",
+  trControl = custom)
+plot(model.lasso)
+```
+
+
+```{r}
+# Prédictions sur x_test pour chaque lambda
+preds <- predict(model.lasso, x_test, s = grid)
+
+# Calcul du MSE, biais² et variance
+mse <- colMeans((preds - y_test)^2)
+biais2 <- (colMeans(preds) - mean(y_test))^2
+variance <- apply(preds, 2, var)
+
+# Construire le dataframe pour le plot
+df_plot <- data.frame(
+  lambda = grid,
+  MSE = mse/max(mse),
+  Biais2 = biais2/max(biais2),
+  Variance = variance/max(variance)
+) %>%
+  mutate(lambda_log = log(lambda))
+
+ggplot(df_plot, aes(x = lambda_log)) +
+  geom_line(aes(y = MSE, color = "MSE"), linewidth = 0.7) +
+  geom_line(aes(y = Biais2, color = "Biais²"), linewidth = 0.7) +
+  geom_line(aes(y = Variance, color = "Variance"), linewidth = 0.7) +
+  scale_color_manual(values = c("MSE" = "black", "Biais²" = "blue", "Variance" = "red")) +
+  labs(x = "log(Lambda)", y = "Mean Squarred Error", title = "Biais, Variance et MSE en fonction de Lambda") +
+  geom_vline(xintercept=log(model.lasso$lambda.min), color="gray")+
+  theme_minimal()
+```
+Sur des données test, l’optimum peut être à $\lambda$ faible car le modèle a besoin d’une certaine complexité pour bien généraliser. A priori c'est un modèle dense.
+```{r}
+coef(model.lasso, s = model.lasso$lambda.min) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Variable") %>%
+  rename(Coefficient = `s1`) %>%
+  kbl(digits = 3) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r}
+# Calcul des métriques
+y_pred <- predict(model.lasso, newx = x_test, s = model.lasso$lambda.min)
+metrics_lasso <- tibble(
+  RMSE_C = rmse_c(y_test,y_pred),
+  MSE = mean((y_test - y_pred)^2),
+  RMSE = rmse(y_test, y_pred),
+  R2 = R2(y_pred, y_test)
+)
+
+metrics_lasso %>%
+  kbl(digits = 3) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+## Model D: Ridge
+```{r}
+grid = 10^seq(3,-3,length=100)
+
+model.ridge <- cv.glmnet(
+  x_train, y_train, 
+  alpha = 0, 
+  lambda = grid, 
+  preProc = c("center", "scale"),
+  method = "glmnet",
+  trControl = cumstom)
+plot(model.ridge)
+```
+
+
+```{r}
+# Prédictions sur x_test pour chaque lambda
+preds <- predict(model.ridge, x_test, s = grid)
+
+# Calcul du MSE, biais² et variance
+mse <- colMeans((preds - y_test)^2)
+biais2 <- (colMeans(preds) - mean(y_test))^2
+variance <- apply(preds, 2, var)
+
+# Construire le dataframe pour le plot
+df_plot <- data.frame(
+  lambda = grid,
+  MSE = mse/max(mse),
+  Biais2 = biais2/max(biais2),
+  Variance = variance/max(variance)
+) %>%
+  mutate(lambda_log = log(lambda))
+
+ggplot(df_plot, aes(x = lambda_log)) +
+  geom_line(aes(y = MSE, color = "MSE"), linewidth = 0.7) +
+  geom_line(aes(y = Biais2, color = "Biais²"), linewidth = 0.7) +
+  geom_line(aes(y = Variance, color = "Variance"), linewidth = 0.7) +
+  scale_color_manual(values = c("MSE" = "black", "Biais²" = "blue", "Variance" = "red")) +
+  labs(x = "log(Lambda)", y = "Mean Squarred Error", title = "Biais, Variance et MSE en fonction de Lambda") +
+  geom_vline(xintercept=log(model.lasso$lambda.min), color="gray")+
+  theme_minimal()
+```
+
+```{r}
+# Calcul des métriques
+y_pred <- predict(model.ridge, newx = x_test, s = model.ridge$lambda.min)
+metrics_ridge <- tibble(
+  RMSE_C = rmse_c(y_test,y_pred),
+  MSE = mean((y_test - y_pred)^2),
+  RMSE = rmse(y_test, y_pred),
+  R2 = R2(y_pred, y_test)
+)
+
+metrics_lasso %>%
+  kbl(digits = 3) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+```
+```{r}
+names(train)
+```
+
+
+## Model E: MLR with interactions
+```{r}
+model.big <- lm(
+  Claim ~ . 
+    + I(Bonus_Malus/Period_Exp) + I(Bonus_Malus*Period_Exp) 
+    + I(Age*Bonus_Malus) + I(Age/Bonus_Malus)  
+    + I(Age*Period_Exp) + I(Age/Period_Exp), 
+  data=train)
+
+summary(model.big)$coefficients %>%
+  round(4) %>%
+  kbl() %>%
+  kable_styling(full_width = FALSE)
+```
+
+```{r}
+y_pred <- predict(model.big, test %>%  dplyr::select(-Claim))
+metrics_big <- tibble(
+  RMSE_C = rmse_c(y_test, y_pred),
+  MSE = mean((y_test - y_pred)^2),
+  RMSE = rmse(y_test, y_pred),
+  MAE = mae(y_test, y_pred),
+  R2 = R2(y_pred, y_test)
+)
+
+metrics_big %>%
+  kbl(digits = 3) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+```

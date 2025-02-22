@@ -371,9 +371,9 @@ ggplot(results, aes(x = actual, y = pred)) +
   theme_minimal()
 ```
 
-## Model C: Lasso
+## Model C: Ridge
 ```{r}
-grid = 10^seq(2,-6,length=100)
+grid = 10^seq(4,-6,length=100)
 
 x_train_pen <- train %>% 
   dplyr::select(-Claim) %>%
@@ -385,15 +385,13 @@ x_test_pen <- test %>%
   as.matrix()
 
 model.lasso <- cv.glmnet(
-  x_train_pen, y_train, 
+  x_train_pen, y_train,
   alpha = 0, 
   lambda = grid, 
   preProc = c("center", "scale"),
   method = "glmnet",
   weights = w,
   trControl = custom)
-
-plot(model.lasso)
 ```
 
 Sur des données test, l’optimum peut être à $\lambda$ faible car le modèle a besoin d’une certaine complexité pour bien généraliser. A priori c'est un modèle dense.

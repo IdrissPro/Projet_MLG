@@ -1,0 +1,141 @@
+
+```{r}
+# Charger les librairies nécessaires
+library(dplyr)      # Manipulation des données
+library(tidyr)      # Manipulation des données
+library(ggplot2)    # Visualisation
+library(readr)      # Lecture de fichiers CSV
+library(GGally)
+set.seed(2025)
+
+# Charger les données
+train <- read.csv('train_set.csv', header = T, sep = ",",dec=".")
+
+
+# Afficher un aperçu des données
+head(train)
+
+```
+
+```{r}
+# Conversion des colonnes catégoriques en facteurs
+categorical_cols <- train %>% select(where(is.character)) %>% colnames()
+train[categorical_cols] <- lapply(train[categorical_cols], as.factor)
+```
+
+```{r}
+library(Metrics)
+
+rmse_c <- function(actuals, predictions) {
+  # Définition des classes
+  C_1 <- which(actuals %in% c(0, 1))
+  C_2 <- which(actuals == 2)
+  C_3 <- which(actuals == 3)
+  C_4 <- which(actuals > 3)
+
+  # Calcul du RMSE pour chaque classe (en évitant les erreurs si une classe est vide)
+  rmse_1 <- rmse(actuals[C_1], predictions[C_1])
+  rmse_2 <- rmse(actuals[C_2], predictions[C_2])
+  rmse_3 <- rmse(actuals[C_3], predictions[C_3])
+  rmse_4 <- rmse(actuals[C_4], predictions[C_4])
+
+  # Combinaison des RMSE (en ignorant les valeurs NA)
+  rmse_values <- c(rmse_1, rmse_2, rmse_3, rmse_4)
+  RMSE_C <- mean(rmse_values, na.rm = TRUE)  # Moyenne des RMSE valides
+
+  # Affichage des résultats
+  cat("RMSE_1 (classe très fréquente) :", rmse_1, "\n")
+  cat("RMSE_2 (classe fréquente) :", rmse_2, "\n")
+  cat("RMSE_3 (classe rare) :", rmse_3, "\n")
+  cat("RMSE_4 (classe très rare) :", rmse_4, "\n")
+  cat("RMSE combiné (RMSE_C) :", RMSE_C, "\n")
+
+  return(RMSE_C)
+}
+
+```
+
+```{r message=FALSE}
+# Charger les bibliothèques nécessaires
+library(dplyr)
+library(lattice)
+library(caret)
+library(rsample)
+
+# Créer une copie du dataset original pour ajouter des colonnes
+train_modified <- train
+
+# Ajouter la colonne 'Age_class'
+train_modified <- train_modified %>%
+  mutate(Age_class = case_when(
+    Age < 25 ~ 0,
+    Age >= 25 & Age <= 50 ~ 1,
+    Age > 50 ~ 2
+  ))
+
+# Encodage ordinal des variables catégoriques
+train_modified <- train_modified %>%
+  mutate(
+    Car_Model = as.numeric(factor(Car_Model, levels = unique(Car_Model))),
+    Car_Fuel = as.numeric(factor(Car_Fuel, levels = unique(Car_Fuel))),
+    Urban_rural_class = as.numeric(factor(Urban_rural_class, levels = unique(Urban_rural_class)))
+  )
+
+# Ajouter la colonne de stratification 'Claim_stratify'
+train_modified <- train_modified %>%
+  mutate(Claim_stratify = case_when(
+    Claim == 0 ~ 1,
+    Claim == 1 ~ 1,
+    Claim == 2 ~ 2,
+    Claim == 3 ~ 3,
+    Claim > 3 ~ 4
+  ))
+
+# Séparer la classe 4
+classe_4 <- train_modified %>% filter(Claim_stratify == 4)
+
+# Séparer 2 observations pour le test et 4 pour le train
+classe_4_test <- classe_4 %>% sample_n(2)
+classe_4_train <- classe_4 %>% anti_join(classe_4_test, by = "PolID")  # pour ne pas avoir les mêmes éléments de la classe 4 dans le test et le train
+
+# Split du reste des données avec stratification
+reste <- train_modified %>% filter(Claim_stratify != 4)
+
+split_reste <- initial_split(reste, prop = 0.7, strata = "Claim_stratify")
+
+# Obtenir les sets train et test restants
+train_reste <- training(split_reste)
+test_reste <- testing(split_reste)
+
+# Ajouter la classe 4 dans les splits finaux
+train_set <- bind_rows(train_reste, classe_4_train)
+test_set <- bind_rows(test_reste, classe_4_test)
+
+# Supprimer la colonne de stratification après le split
+train_set <- train_set %>% select(-Claim_stratify)
+test_set <- test_set %>% select(-Claim_stratify)
+
+# Supprimer certaines colonnes non pertinentes pour l'étude
+train_set <- train_set %>% select(-French_region, -PolID)
+test_set <- test_set %>% select(-French_region, -PolID)
+
+
+# Standardiser les variables prédictives (exclure Claim)
+train_set_scaled <- train_set %>%
+  select(-Claim) %>%
+  scale() %>%
+  as.data.frame()
+
+test_set_scaled <- test_set %>%
+  select(-Claim) %>%
+  scale() %>%
+  as.data.frame()
+
+# Réintégrer Claim après scaling
+train_set_scaled$Claim <- train_set$Claim
+test_set_scaled$Claim <- test_set$Claim
+
+summary(test_set)
+```
+
+

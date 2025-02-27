@@ -1,0 +1,647 @@
+
+---
+title: "Polices d'assurance"
+author: "Idriss Louzi, Martin Youssef, Alex Irani, Théophile Schmutz"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    
+    # Overall theme
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    
+    # Table of contents
+    number_sections: true
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(rmarkdown)
+library(dplyr)
+library(caret)
+library(kableExtra)
+library(ggplot2)
+library(broom)
+library(tidyr)
+library(GGally)
+library(glmnet)
+library(rcompanion)
+library(reshape2)
+library(caret)
+library(MASS)
+library(Metrics)
+library(tibble)
+
+set.seed(2025)
+```
+
+Définition du rmse_c et d'un trainControl pour la cross-validation
+```{r}
+rmse_c <- function(actuals, predictions, print=TRUE) {
+  # Définition des classes
+  C_1 <- which(actuals %in% c(0, 1))
+  C_2 <- which(actuals == 2)
+  C_3 <- which(actuals == 3)
+  C_4 <- which(actuals > 3)
+  
+  # Calcul du RMSE pour chaque classe (en évitant les erreurs si une classe est vide)
+  rmse_1 <- rmse(actuals[C_1], predictions[C_1]) 
+  rmse_2 <- rmse(actuals[C_2], predictions[C_2]) 
+  rmse_3 <- rmse(actuals[C_3], predictions[C_3]) 
+  rmse_4 <- rmse(actuals[C_4], predictions[C_4]) 
+  
+  # Combinaison des RMSE (en ignorant les valeurs NA)
+  rmse_values <- c(rmse_1, rmse_2, rmse_3, rmse_4)
+  RMSE_C <- mean(rmse_values, na.rm = TRUE)  # Moyenne des RMSE valides
+  
+  if (print){
+    # Affichage des résultats
+    cat("RMSE_1 (classe très fréquente) :", rmse_1, "\n")
+    cat("RMSE_2 (classe fréquente) :", rmse_2,"-",length(C_2), "observations\n")
+    cat("RMSE_3 (classe rare) :", rmse_3,"-",length(C_3), "observations\n")
+    cat("RMSE_4 (classe très rare) :", rmse_4,"-",length(C_4), "observations\n")
+    cat("RMSE combiné (RMSE_C) :", RMSE_C, "\n")}
+  
+  return(RMSE_C)
+}
+custom <- trainControl(
+  method = 'repeatedcv',
+  number = 5,  # Using 5-fold cross-validation
+  repeats = 3,  # Repeating 3 times for robustness
+  summaryFunction = rmse_c, #defaultSummary,  # Default metrics (RMSE, MAE)
+  allowParallel = TRUE  # Use parallel processing if resources allow
+)
+```
+
+# Données
+
+```{r}
+data <-read.csv('train_set.csv', header = T, sep = ",",dec=".")
+data <- data %>% dplyr::select(-PolID)
+paged_table(data)
+```
+
+```{r}
+data$TrancheAge <- cut(data$Age, 
+                        breaks = c(-Inf, 25, 35, 45, 55, 65, 110), 
+                        labels = c("Moins de 25 ans", "25-34 ans", "35-44 ans", 
+                                   "45-54 ans", "55-64 ans", "65 ans et plus"), 
+                        right = FALSE)
+data <- data %>%
+  mutate(TrancheBonus_Malus = case_when(
+    Bonus_Malus < 100 ~ "Bonus",
+    Bonus_Malus == 100 ~ "Neutre",         # 100 = pas de bonus, pas de malus
+    Bonus_Malus > 100 & Bonus_Malus <= 150 ~ "Malus modéré",
+    Bonus_Malus > 150 & Bonus_Malus <= 250 ~ "Malus élevé",
+    Bonus_Malus > 250 & Bonus_Malus <= 350 ~ "Malus très élevé",
+    TRUE ~ "Erreur" 
+  ))
+
+data <- data %>%
+  mutate(TrancheCar_Power = case_when(
+    Car_Power <= 6 ~ "Puissance --",
+    Car_Power > 6 & Car_Power <= 10 ~ "Puissance -",
+    Car_Power > 10 & Car_Power <= 12 ~ "Puissance +",
+    Car_Power > 12 ~ "Puissance ++",
+    TRUE ~ "Erreur" 
+  ))
+
+data[, c("Car_Model", "Car_Fuel", "Urban_rural_class", "French_region", "TrancheCar_Power", "TrancheBonus_Malus", "TrancheAge")] <- lapply(data[, c("Car_Model", "Car_Fuel", "Urban_rural_class", "French_region", "TrancheCar_Power", "TrancheBonus_Malus", "TrancheAge")], as.factor)
+```
+
+Encodage
+
+```{r}
+# Charger les bibliothèques nécessaires
+library(dplyr)
+
+# Définir l'ordre des niveaux pour chaque variable catégorielle
+data <- data %>%
+  mutate(
+    # Encodage ordinal de TrancheAge
+    TrancheAge = factor(TrancheAge, 
+                       levels = c("Moins de 25 ans", "25-34 ans", "35-44 ans", 
+                                  "45-54 ans", "55-64 ans", "65 ans et plus"), 
+                       ordered = TRUE),
+    
+    # Encodage ordinal de TrancheBonus_Malus
+    TrancheBonus_Malus = factor(TrancheBonus_Malus, 
+                               levels = c("Bonus", "Neutre", "Malus modéré", 
+                                          "Malus élevé", "Malus très élevé"), 
+                               ordered = TRUE),
+    
+    # Encodage ordinal de TrancheCar_Power
+    TrancheCar_Power = factor(TrancheCar_Power, 
+                             levels = c("Puissance --", "Puissance -", 
+                                        "Puissance +", "Puissance ++"), 
+                             ordered = TRUE),
+  )
+
+# Encodage ordinal par ordre alphabétique pour les autres variables catégorielles: Car_Fuel,Urban_rural_class,French_region et Car_Model
+data <- data %>%
+  mutate(
+    Car_Fuel = factor(Car_Fuel, ordered = TRUE),
+    Urban_rural_class = factor(Urban_rural_class, ordered = TRUE),
+    French_region = factor(French_region, ordered = TRUE),
+    Car_Model = factor(Car_Model, ordered = TRUE)
+  )
+
+# Vérifier la structure des données après encodage ordinal
+str(data)
+```
+
+On split en train test avec stratification selon les classes du RMSE combiné 
+```{r}
+data$Claim <- as.numeric(data$Claim)
+data <- data %>%
+  mutate(Ci = case_when(
+    Claim %in% c(0, 1) ~ 1,
+    Claim == 2 ~ 2,
+    Claim == 3 ~ 3,
+    Claim >= 4 ~ 4,
+  ))
+data$Ci <- as.factor(data$Ci)
+train.index <- createDataPartition(data$Ci, p = .6, list = FALSE)
+data <- data %>% dplyr::select(-Ci)
+
+train <- data[ train.index,] 
+test  <- data[-train.index,]
+
+x_train <- train %>% 
+  dplyr::select(-Claim) %>%
+  as.matrix()
+y_train <- train$Claim
+
+x_test <- test %>% 
+  dplyr::select(-Claim) %>%
+  as.matrix()
+y_test <- test$Claim
+
+```
+
+## Model A: Simple case
+
+Avec simplement les données comme tel:
+```{r}
+model.complet <- lm(Claim~., data=train)
+summary(model.complet)$coefficients %>%
+  round(4) %>%
+  kbl() %>%
+  kable_styling(full_width = FALSE)
+```
+```{r}
+  # Prédictions
+  y_pred <- predict(model.complet, test %>% dplyr::select(-Claim))
+```
+
+
+Fonction pour calculer la performance du modèle sur le test selon différentes métriques
+
+```{r}
+calculate_metrics <- function(ypred, ytest) {
+
+  
+  # Calcul des métriques
+  metrics <- tibble(
+    RMSE_C = rmse_c(ytest, ypred),  # RMSE personnalisé (si rmse_c est défini)
+    RMSE = rmse(ytest, ypred),       # RMSE standard
+    MSE = mean((ytest - ypred)^2)   # Erreur quadratique moyenne (MSE)
+  )
+  
+  # Affichage des métriques dans un tableau stylisé
+  metrics %>%
+    kbl(digits = 3) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+}
+
+
+```
+
+```{r}
+calculate_metrics(y_pred, y_test)
+```
+
+Fonction pour afficher un graphe des prédictions
+```{r}
+plot_prediction_errors <- function(actual, prediction) {
+  # Créer un dataframe avec les prédictions, les vraies valeurs et le statut (correct/incorrect)
+  results <- data.frame(
+    pred = prediction,
+    actual = actual,
+    status = actual == round(prediction) 
+  )
+  
+  # Créer le graphique
+  ggplot(results, aes(x = actual, y = pred)) +
+  geom_point(aes(color = status)) +
+  labs(
+    x = "Actual",
+    y = "Prediction",
+    title = "Répartitions des erreurs"
+  ) +
+  theme_minimal()
+}
+```
+
+```{r}
+#plot_prediction_errors(y_test, y_pred)
+```
+On ne prédit que la classe majoritaire C0.
+
+### Model bis: Poids de classe
+
+On définit ici les poids choisis (qui sont fonction de la fréquence d'apparition de chaque classe de Claim (1,2,3,4))
+```{r}
+C_1 <- which(train$Claim %in% c(0, 1))
+C_2 <- which(train$Claim == 2)
+C_3 <- which(train$Claim == 3)
+C_4 <- which(train$Claim > 3)
+
+n1 <- length(which(train$Claim %in% c(0, 1)))
+n2 <- length(which(train$Claim == 2))
+n3 <- length(which(train$Claim == 3))
+n4 <- length(which(train$Claim > 3))
+
+# Calculer les poids pour équilibrer l'importance des classes
+w <- numeric(length(train$Claim))  
+w[C_1] <- 1   # Plus n1 est petit, plus le poids est grand
+w[C_2] <- 4*n2
+w[C_3] <- 4*n3
+w[C_4] <- 4*n4  # Classe rare => poids plus grand
+```
+
+```{r}
+model.weights <- lm(Claim~., data=train, weights=w)
+summary(model.weights)$coefficients %>%
+  round(4) %>%
+  kbl() %>%
+  kable_styling(full_width = FALSE)
+```
+Calcul des prédictions:
+```{r}
+y_pred_model.weights<-predict(model.weights, test %>%  dplyr::select(-Claim))
+```
+
+Affichage des métriques
+```{r}
+calculate_metrics(y_pred_model.weights, y_test)
+```
+
+
+```{r}
+#plot_prediction_errors(actual=y_test, prediction=y_pred_model.weights)
+```
+C'est mieux, mais on peut essayer d'améliorer le résultat
+
+## Model B: Modèle avec intéractions
+
+Ici, on rajoute des produits et des rapports de variables que nous avons jugées pertinentes d'un point de vue métier pour les intégrer au modèle ensuite
+```{r}
+# Copie du dataset original
+data_full <- data
+
+# Variables pertinentes pour produits
+vars <- c("Period_Exp", "Car_Power", "Car_Age", "Age", "Bonus_Malus", "Inhab_density")
+
+# Produits à deux variables (var1 * var2)
+for (i in 1:(length(vars) - 1)) {
+  for (j in (i + 1):length(vars)) {  # j commence à i+1 pour éviter répétitions
+    var1 <- vars[i]
+    var2 <- vars[j]
+    
+    new_var_name <- paste0(var1, "_x_", var2)  
+    data_full[[new_var_name]] <- data_full[[var1]] * data_full[[var2]]
+  }
+}
+
+# Produits à trois variables (var1 * var2 * var3)
+for (i in 1:(length(vars) - 2)) {
+  for (j in (i + 1):(length(vars) - 1)) {
+    for (k in (j + 1):length(vars)) {  # k commence à j+1 pour éviter répétitions
+      var1 <- vars[i]
+      var2 <- vars[j]
+      var3 <- vars[k]
+
+      new_var_name <- paste0(var1, "_x_", var2, "_x_", var3)
+      data_full[[new_var_name]] <- data_full[[var1]] * data_full[[var2]] * data_full[[var3]] 
+    }
+  }
+}
+```
+
+Maintenant, on fait la même chose mais avec des ratios. A noter qu'on ne peut pas le faire pour les mêmes variables que précédemment car certaines valeurs peuvent être proches de 0:
+
+```{r}
+data %>% dplyr::select(c(
+  "Period_Exp", "Car_Power", "Car_Age", "Age", "Bonus_Malus", "Inhab_density")) %>% summary()
+```
+On peut voir que `Car_Age`, `Inhab_density` et `Period_Exp` peuvent avoir des valeurs très petites, ce qui peut rendre instable la régression à cause du ratio. Donc on ne prends pas de risque et on les retire:
+```{r}
+# Variables à combiner pour ratio
+vars <- c("Period_Exp", "Car_Power", "Age", "Bonus_Malus", "Inhab_density")
+
+for (i in 1:length(vars)) {
+  for (j in 1:length(vars)) {
+    if (i != j) {  # On évite var1 / var1
+      var1 <- vars[i]
+      var2 <- vars[j]
+      new_var_name <- paste0(var1, "_div_", var2)
+      data_full[[new_var_name]] <- data_full[[var1]] / data_full[[var2]]
+    }
+  }
+}
+
+```
+On stratifie le train/test split sur ce jeu de données encore une fois:
+```{r}
+
+# Créer la variable Ci dans data_full
+data_full <- data_full %>%
+  mutate(Ci = case_when(
+    Claim %in% c(0, 1) ~ 1,
+    Claim == 2 ~ 2,
+    Claim == 3 ~ 3,
+    Claim >= 4 ~ 4
+  ))
+
+# Convertir Ci en facteur
+data_full$Ci <- as.factor(data_full$Ci)
+
+# Créer un split stratifié basé sur Ci
+train.index <- createDataPartition(data_full$Ci, p = 0.6, list = FALSE)
+
+# Diviser data_full en train_full et test_full
+train_full <- data_full[train.index, ]
+test_full <- data_full[-train.index, ]
+
+# Supprimer la colonne Ci
+train_full <- train_full %>% dplyr::select(-Ci)
+test_full <- test_full %>% dplyr::select(-Ci)
+
+# Préparer les matrices x et y pour l'entraînement et le test
+x_train_full <- train_full %>% 
+  dplyr::select(-Claim) %>%
+  as.matrix()
+y_train_full <- train_full$Claim
+
+x_test_full <- test_full %>% 
+  dplyr::select(-Claim) %>%
+  as.matrix()
+y_test_full <- test_full$Claim
+
+```
+
+
+```{r}
+model.interaction <- lm(Claim~., data=train_full, weights=w)
+summary(model.complet)$coefficients %>%
+  round(4) %>%
+  kbl() %>%
+  kable_styling(full_width = FALSE)
+```
+```{r}
+y_pred_model.interaction<-predict(model.interaction, test_full %>%  dplyr::select(-Claim))
+```
+
+```{r}
+calculate_metrics(ypred=y_pred_model.interaction,ytest=y_test_full)
+```
+
+```{r}
+#plot_prediction_errors(actual=y_test_full,prediction = y_pred_model.interaction)
+```
+Le RMSE_C est meilleur, mais on n'arrive toujours pas à bien prédire les Claims très élevés
+
+Le modèle linéaire n'étant pas le plus adapté pour des variables de comptage, nous passons à présent à des modèles linéaires généralisés:
+
+##Modèle de Poisson:
+
+
+```{r}
+
+# Cross-validation pour Elastic Net (alpha entre 0 et 1)
+
+y_train_full_matrix<-y_train_full %>% as.matrix()
+
+
+cv_fit_poisson <- cv.glmnet(x_train_full, y_train_full_matrix, alpha = 0.5,nlambda=20,family = "poisson",  weights = w, nfolds = 5,type.measure = "default",parallel=TRUE,standardize=TRUE,trace.it=1)
+
+best_lambda <- cv_fit_poisson$lambda.min
+cat("Meilleur lambda :", best_lambda, "\n")
+```
+
+```{r}
+plot(cv_fit_poisson)
+```
+
+```{r}
+best_lambda<-0.004842487
+# Coefficients du meilleur modèle
+coef_poisson<-coef(cv_fit_poisson, s = best_lambda)
+coef_poisson
+```
+
+```{r}
+# Convertir en un vecteur et supprimer l'intercept
+coef_poisson <- as.vector(coef_poisson)
+selected_vars <- which(coef_poisson != 0)[-1]-1  # Indices des variables sélectionnées
+selected_vars
+```
+
+
+On va créer un modèle poisson sur les variables sélectionnées par elasticnet
+
+selected vars:  [1]  1  3  4  5 14 15 16 19 24 25 30 31 36 37 38 42 44 45 51 52 54 55 56 57 58 60 61 63 66 68
+
+```{r}
+library(data.table)
+
+# Créer un sous-ensemble de données avec les variables sélectionnées (entraînement)
+x_train_selected <- as.data.table(x_train_full[, selected_vars, drop = FALSE])
+
+# Convertir toutes les colonnes de type character en numeric
+x_train_selected <- x_train_selected[, lapply(.SD, function(col) as.numeric(as.character(col)))]
+
+# Convertir x_train_selected en matrice
+x_train_selected <- as.matrix(x_train_selected)
+
+# Créer train_selected avec la variable cible et les variables sélectionnées
+train_selected <- data.table(Claim = y_train_full, x_train_selected)
+
+# Convertir train_selected en dataframe
+train_selected <- as.data.frame(train_selected)
+
+# Vérifier les types de colonnes dans train_selected
+str(train_selected)
+
+# Créer un sous-ensemble de données avec les variables sélectionnées (test)
+x_test_selected <- as.data.table(x_test_full[, selected_vars, drop = FALSE])
+
+# Convertir toutes les colonnes de type character en numeric
+x_test_selected <- x_test_selected[, lapply(.SD, function(col) as.numeric(as.character(col)))]
+
+# Convertir x_test_selected en matrice
+x_test_selected <- as.matrix(x_test_selected)
+
+# Créer test_selected avec la variable cible et les variables sélectionnées
+test_selected <- data.table(Claim = y_test_full, x_test_selected)
+
+# Convertir test_selected en dataframe
+test_selected <- as.data.frame(test_selected)
+
+# Vérifier les types de colonnes dans test_selected
+str(test_selected)
+
+```
+On va maintenant standardiser nos données:
+```{r}
+standardize_data <- function(data, target_col=NULL) {
+    if (is.null(target_col)) {
+    data_standardized <- scale(data)
+    return(as.data.table(data_standardized))
+  } else {
+  # Exclure la variable cible de la standardisation
+  features <- data[, !colnames(data) %in% target_col, drop = FALSE]
+  
+  # Standardiser les variables explicatives
+  features_standardized <- scale(features)
+  
+  # Réintégrer la variable cible non standardisée
+  data_standardized <- data.table(
+    Claim = data[[target_col]],  # Conserver la variable cible originale
+    features_standardized        # Variables explicatives standardisées
+  )
+  
+  return(data_standardized) }
+}
+```
+
+```{r}
+# Standardiser les données d'entraînement et de test
+train_selected_standardized <- standardize_data(train_selected, target_col = "Claim")
+
+x_train_selected_standardized <- standardize_data(x_train_selected)
+
+test_selected_standardized <- standardize_data(test_selected, target_col = "Claim")
+
+x_test_selected_standardized <- standardize_data(x_test_selected)
+
+```
+
+
+
+```{r}
+# Ajuster un modèle de Poisson sur les variables sélectionnées
+poisson_model <- glm(Claim ~ ., data = train_selected_standardized, family = poisson(link='log'), weights = w)
+
+# Résumé du modèle
+summary(poisson_model)
+```
+
+
+```{r}
+y_pred_model.poisson<-round(predict(poisson_model, newdata = x_test_selected_standardized, type = "response"))
+calculate_metrics(y_pred_model.poisson, y_test_full)
+
+```
+```{r}
+ # Ajuster un modèle de Poisson sur les variables sélectionnées
+ poisson_model_2 <- glmnet(x=x_train_selected_standardized,y=y_train_full, family = "poisson", weights = w,alpha=0.5,lambda=best_lambda,standardize=FALSE)
+ 
+y_pred_model.poisson2<-round(predict(poisson_model_2, newx = x_test_selected_standardized %>% as.matrix(), type = "response"))
+calculate_metrics(y_pred_model.poisson2, y_test_full)
+```
+
+
+```{r}
+plot_prediction_errors(actual=y_test_full,prediction = as.vector(y_pred_model.poisson2))
+```
+
+
+Le résultat est bon, testons si la dispersion est forte à l'aide d'un test de surdispersion:
+
+
+
+
+```{r}
+library(AER)
+# 1. Effectuer le test de surdispersion
+test_surdispersion <- dispersiontest(poisson_model)
+
+# 2. Extraire les résultats du test
+statistique_test <- test_surdispersion$statistic
+valeur_p <- test_surdispersion$p.value
+
+# 3. Interpréter les résultats
+if (valeur_p < 0.05) {
+  interpretation <- "Il y a une surdispersion significative dans les données. Le modèle de Poisson n'est pas approprié."
+  recommandation <- "Un modèle binomial négatif pourrait mieux prendre en compte la surdispersion."
+} else {
+  interpretation <- "Il n'y a pas de surdispersion significative dans les données. Le modèle de Poisson est approprié."
+  recommandation <- "Le modèle de Poisson peut être utilisé sans modification."
+}
+
+cat("Statistique du test : ", round(statistique_test, 3), "\n")
+cat("Interprétation : ", interpretation, "\n")
+cat("Recommandation : ", recommandation, "\n")
+```
+On voudrait passer au modèle binomial négatif et faire de la cross_validation dessus sur les variables séllectionnées par le modèle Poisson. Malheureusememnt, le seul package qui fait ça n'accepte pas des données de taille volumineuse.
+Essayons de transformer Claim logarithmiquement pour atténuer de la sur-dispersion:
+
+```{r}
+
+library(glmnet)
+
+# Transformation log sur la target (éviter log(0))
+train_selected_standardized2<-train_selected_standardized
+train_selected_standardized2$log_Claim <- log(train_selected_standardized2$Claim + 1)
+
+# Préparer les matrices pour glmnet (standardisation déjà faite)
+X_train2 <- as.matrix(train_selected_standardized2[, !c("Claim", "log_Claim"), with = FALSE])
+y_train2 <- as.matrix(train_selected_standardized2$log_Claim)  # Modèle sur la target transformée
+
+X_test2 <- as.matrix(x_test_selected_standardized)
+
+# Ajuster un modèle de Poisson pénalisé avec Elastic Net (alpha = 0.5 pour Elastic Net)
+cv_model <- cv.glmnet(x_train_full, y_train_full_matrix, alpha = 0.5,nlambda=20,family = "poisson",  weights = w, nfolds = 5,type.measure = "default",standardize=FALSE,trace.it=1)
+
+# Sélectionner la meilleure valeur de lambda
+best_lambda <- cv_model$lambda.min
+
+# Ajuster le modèle final avec lambda optimal
+poisson_model <- glmnet(X_train2, y_train2, family = "poisson", alpha = 0.5, lambda = 1e-3, weights = w)
+
+# Prédictions sur l'échelle log
+log_y_pred <- predict(poisson_model, newx = X_test2, type = "response")
+
+# Annuler la transformation (revenir à l'échelle d'origine)
+y_pred_exp <- round(exp(log_y_pred) - 1)  # -1 pour compenser log(Claim + 1)
+
+# Calculer les métriques sur l'échelle originale
+calculate_metrics(y_pred_exp, y_test_full)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}

@@ -679,7 +679,7 @@ x_train_matrix <- as.matrix(x_train_encoded)
 x_test_matrix  <- as.matrix(x_test_encoded)
 
 # Création des objets DMatrix pour xgboost
-dtrain <- xgb.DMatrix(data = x_train_matrix, label = y_train_num)
+dtrain <- xgb.DMatrix(data = x_train_matrix, label = y_train_num,weight = w)
 dtest  <- xgb.DMatrix(data = x_test_matrix, label = y_test_num)
 
 num_class <- max(y_train_num) + 1
